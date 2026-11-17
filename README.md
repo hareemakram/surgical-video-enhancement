@@ -8,7 +8,7 @@ budget**, without shifting tissue colour. A Python test suite verifies image qua
 ground truth and checks latency. Requirements trace to tests, and CI publishes a verification
 report on every push.
 
-> Engineering portfolio project. Not a medical device and not for clinical use.
+> **Disclaimer:** Educational portfolio project. Not a medical device and not certified; it follows medical-software documentation practices for demonstration only.
 
 ![Before and after: synthetic cautery smoke and glare, original left, enhanced right](docs/img/before_after.gif)
 
