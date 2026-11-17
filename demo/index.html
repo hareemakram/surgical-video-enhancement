@@ -1,0 +1,342 @@
+<meta charset="utf-8">
+<title>Surgical Video Enhancement</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<style>
+/* Layout: an OR display console. One large video stage, an instrument readout strip under it,
+   then a per-frame trace that doubles as the scrubber. Dark-first, like a surgical monitor. */
+:root {
+  --bg: #0d1314;          /* monitor surround, slight drape-teal bias */
+  --panel: #141c1e;
+  --line: #24312f;
+  --fg: #dfe7e5;
+  --muted: #8a9b98;
+  --accent: #5fbfb3;      /* drape teal: "after" / enhanced */
+  --before: #d39a7c;      /* tissue tone: "before" / raw */
+  --budget: #e0b35a;      /* latency budget line */
+  --stage: #000;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #eef2f1; --panel: #ffffff; --line: #d3dcda; --fg: #142021; --muted: #5a6b69;
+    --accent: #1f857a; --before: #a85c38; --budget: #9a6a10; --stage: #000; color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #eef2f1; --panel: #ffffff; --line: #d3dcda; --fg: #142021; --muted: #5a6b69;
+  --accent: #1f857a; --before: #a85c38; --budget: #9a6a10; --stage: #000; color-scheme: light;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--bg); color: var(--fg); font: 15px/1.55 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 18px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font: 600 clamp(1.5rem, 3.2vw, 2rem)/1.1 var(--f-display); margin: 0; letter-spacing: .01em; text-wrap: balance; }
+.sub { color: var(--muted); margin: 4px 0 0; max-width: 62ch; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.label { font: 500 11px/1 var(--f-mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: 500 13px/1 var(--f-body); color: var(--muted); background: transparent; border: 0; padding: 9px 14px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { color: var(--fg); background: var(--panel); box-shadow: inset 0 -2px 0 var(--accent); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.stage {
+  position: relative; background: var(--stage); border-radius: 8px; overflow: hidden;
+  aspect-ratio: 16 / 9; max-width: 100%; user-select: none; touch-action: none; cursor: ew-resize;
+}
+.stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.stage .after { clip-path: inset(0 0 0 var(--split, 50%)); }
+.stage.sbs { cursor: default; aspect-ratio: 32 / 9; }
+.stage.sbs video { width: 50%; }
+.stage.sbs .after { left: 50%; clip-path: none; }
+.handle { position: absolute; top: 0; bottom: 0; left: var(--split, 50%); width: 0; border-left: 2px solid #fff; pointer-events: none; }
+.handle::after {
+  content: ""; position: absolute; top: 50%; left: -15px; width: 28px; height: 28px; margin-top: -14px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.5);
+  -webkit-mask: linear-gradient(#000 0 0); /* solid knob */
+}
+.handle::before {
+  content: "◂ ▸"; position: absolute; top: 50%; left: -11px; transform: translateY(-50%); z-index: 1;
+  font: 600 10px/1 var(--f-mono); color: #111; white-space: nowrap; letter-spacing: -.05em;
+}
+.stage.sbs .handle { display: none; }
+.tag { position: absolute; top: 10px; font: 500 11px/1 var(--f-mono); letter-spacing: .1em; text-transform: uppercase;
+  padding: 6px 8px; border-radius: 4px; background: rgba(0,0,0,.62); pointer-events: none; }
+.tag.b { left: 10px; color: #f0c2a8; }
+.tag.a { right: 10px; color: #9be3d8; }
+
+.transport { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.btn { font: 500 13px/1 var(--f-body); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 9px 14px; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { min-width: 84px; }
+
+.readout { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.readout > div { padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
+.readout > div + div { border-left: 1px solid var(--line); }
+.val { font: 500 1.35rem/1 var(--f-mono); font-variant-numeric: tabular-nums; }
+.val small { font-size: .7rem; color: var(--muted); margin-left: 3px; }
+.pill { justify-self: start; font: 500 11px/1 var(--f-mono); padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.ok { color: var(--accent); }
+.warn { color: var(--budget); }
+
+.trace { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px 8px; display: grid; gap: 8px; }
+.trace-head { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
+.key { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.key i { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
+canvas { width: 100%; height: 150px; display: block; cursor: pointer; }
+
+.notes { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 28px; padding-top: 6px; }
+.notes h2 { font: 600 1.05rem/1.2 var(--f-display); margin: 0 0 8px; letter-spacing: .02em; }
+.notes p, .notes li { color: var(--muted); max-width: 62ch; }
+.notes p { margin: 0 0 10px; }
+.notes ol { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }
+.notes strong { color: var(--fg); font-weight: 500; }
+footer { border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font-size: 12.5px; }
+footer a, .notes a { color: var(--accent); }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+
+@media (max-width: 720px) {
+  .readout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .readout > div + div { border-left: 0; }
+  .readout > div:nth-child(even) { border-left: 1px solid var(--line); }
+  .readout > div:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .readout > div:last-child { grid-column: 1 / -1; border-left: 0; }
+  .notes { grid-template-columns: minmax(0, 1fr); }
+  .stage.sbs { aspect-ratio: 16 / 9; }
+  .stage.sbs video { width: 100%; height: 50%; }
+  .stage.sbs .after { left: 0; top: 50%; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Surgical Video Enhancement</h1>
+      <p class="sub">Real-time smoke and glare reduction for laparoscopic video. C++/OpenCV pipeline, measured per frame against a 30&nbsp;ms budget.</p>
+    </div>
+    <div class="seg" id="clipSeg" role="group" aria-label="Clip"></div>
+  </header>
+
+  <div class="stage" id="stage" aria-label="Before and after comparison. Drag to move the divider.">
+    <video class="before" id="vb" muted playsinline loop preload="auto"></video>
+    <video class="after" id="va" muted playsinline loop preload="auto"></video>
+    <div class="handle" id="handle"></div>
+    <span class="tag b">Original</span>
+    <span class="tag a">Enhanced</span>
+  </div>
+
+  <div class="controls">
+    <div class="transport">
+      <button class="btn primary" id="play" type="button">Pause</button>
+      <button class="btn" id="back" type="button" aria-label="Previous frame">−1 frame</button>
+      <button class="btn" id="fwd" type="button" aria-label="Next frame">+1 frame</button>
+      <div class="seg" role="group" aria-label="Speed">
+        <button type="button" data-rate="0.25" aria-pressed="false">¼×</button>
+        <button type="button" data-rate="0.5" aria-pressed="false">½×</button>
+        <button type="button" data-rate="1" aria-pressed="true">1×</button>
+      </div>
+    </div>
+    <div class="seg" role="group" aria-label="View">
+      <button type="button" id="mWipe" aria-pressed="true">Wipe</button>
+      <button type="button" id="mSbs" aria-pressed="false">Side by side</button>
+    </div>
+  </div>
+
+  <div class="readout" aria-live="off">
+    <div><span class="label">Frame</span><span class="val" id="rFrame">0</span></div>
+    <div><span class="label">Latency</span><span class="val" id="rLat">0<small>ms</small></span></div>
+    <div><span class="label">Haze level</span><span class="val" id="rHaze">0<small>%</small></span></div>
+    <div><span class="label">Glare</span><span class="val" id="rGlare">0<small>% FOV</small></span></div>
+    <div><span class="label">Clip p95 vs 30 ms</span><span class="val" id="rP95">0<small>ms</small></span><span class="pill ok" id="rBudget">within budget</span></div>
+  </div>
+
+  <div class="trace">
+    <div class="trace-head">
+      <span class="label">Per-frame trace</span>
+      <span class="key"><i style="color:var(--accent)"></i>latency (ms)</span>
+      <span class="key"><i style="color:var(--before)"></i>estimated haze</span>
+      <span class="key"><i style="color:var(--budget);border-top-style:dashed"></i>30 ms budget</span>
+      <span class="key" id="hw"></span>
+    </div>
+    <canvas id="chart" aria-label="Latency and haze per frame. Click to jump to a frame."></canvas>
+  </div>
+
+  <section class="notes">
+    <div>
+      <h2>What the pipeline does</h2>
+      <ol>
+        <li><strong>Field of view.</strong> Finds the lit scope circle. Nothing outside it is touched.</li>
+        <li><strong>Glare.</strong> Flags bright, colourless highlights and fills them from surrounding tissue (normalized convolution, constant run time).</li>
+        <li><strong>Smoke.</strong> Dark-channel dehazing adapted to tissue: a neutral airlight and a tissue floor keep clear frames unchanged, with temporal smoothing against flicker.</li>
+        <li><strong>Contrast.</strong> CLAHE on luminance, applied as one gain per pixel so tissue hue does not shift.</li>
+      </ol>
+    </div>
+    <div>
+      <h2>How it is verified</h2>
+      <p>Each requirement in the SRS has an automated test. Synthetic footage is rendered with known ground truth, so smoke removal is scored by colour error (CIEDE2000), PSNR and SSIM against the clean frame, not by eye.</p>
+      <p>Latency here is measured inside the C++ pipeline on a 4-core cloud VM. Decode, encode and display are excluded.</p>
+    </div>
+  </section>
+
+  <footer id="credit"></footer>
+</div>
+
+<script src="media/clips.js"></script>
+<script>
+(() => {
+  const clips = window.SVE_CLIPS || [];
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), vb = $("vb"), va = $("va"), chart = $("chart");
+  if (clips.length < 2) document.getElementById("clipSeg").hidden = true;
+  if (!clips.length) { stage.outerHTML = '<div class="empty">No demo media found. Run <span class="mono">python tools/make_demo.py</span> first.</div>'; return; }
+
+  let clip = clips[0], playing = true, split = 50;
+
+  // ---- clip selector ----
+  const seg = $("clipSeg");
+  clips.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = c.title; b.setAttribute("aria-pressed", i === 0);
+    b.onclick = () => { seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b)); load(c); };
+    seg.appendChild(b);
+  });
+
+  function load(c) {
+    clip = c;
+    stage.style.aspectRatio = stage.classList.contains("sbs") ? "" : `${c.width} / ${c.height}`;
+    vb.src = c.before; va.src = c.after;
+    const rate = Number(document.querySelector("[data-rate][aria-pressed='true']").dataset.rate);
+    vb.playbackRate = va.playbackRate = rate;
+    if (playing) { vb.play().catch(() => {}); va.play().catch(() => {}); }
+    const s = c.summary;
+    $("rP95").innerHTML = `${s.p95_ms.toFixed(1)}<small>ms</small>`;
+    const ok = s.p95_ms <= 30;
+    $("rBudget").textContent = ok ? "within budget" : "over budget";
+    $("rBudget").className = "pill " + (ok ? "ok" : "warn");
+    $("hw").textContent = `· ${c.subtitle} · ${c.threads} threads · mean ${s.mean_ms.toFixed(1)} ms`;
+    $("credit").innerHTML = "Footage: " + c.credit.replace(/(CC BY 2\.0)/, '<a href="https://creativecommons.org/licenses/by/2.0/" target="_blank" rel="noopener">$1</a>') +
+      (c.key === "real" ? ' <a href="https://commons.wikimedia.org/wiki/File:A-gallbladder-torsion-presenting-as-acute-cholecystitis-in-an-elderly-woman-A-case-report-1752-1947-5-588-S1.ogv" target="_blank" rel="noopener">Source</a>.' : "");
+    draw(0);
+  }
+
+  // ---- wipe divider ----
+  const setSplit = (p) => { split = Math.min(100, Math.max(0, p)); stage.style.setProperty("--split", split + "%"); };
+  let dragging = false;
+  const fromEvent = (e) => { const r = stage.getBoundingClientRect(); setSplit((e.clientX - r.left) / r.width * 100); };
+  stage.addEventListener("pointerdown", (e) => { if (stage.classList.contains("sbs")) return; dragging = true; stage.setPointerCapture(e.pointerId); fromEvent(e); });
+  stage.addEventListener("pointermove", (e) => { if (dragging) fromEvent(e); });
+  stage.addEventListener("pointerup", () => { dragging = false; });
+  stage.tabIndex = 0;
+  stage.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") { setSplit(split - 5); e.preventDefault(); }
+    if (e.key === "ArrowRight") { setSplit(split + 5); e.preventDefault(); }
+  });
+  setSplit(50);
+
+  // ---- view mode ----
+  const mode = (sbs) => {
+    stage.classList.toggle("sbs", sbs);
+    stage.style.aspectRatio = sbs ? "" : `${clip.width} / ${clip.height}`;
+    $("mWipe").setAttribute("aria-pressed", !sbs); $("mSbs").setAttribute("aria-pressed", sbs);
+  };
+  $("mWipe").onclick = () => mode(false);
+  $("mSbs").onclick = () => mode(true);
+
+  // ---- transport ----
+  const play = $("play");
+  play.onclick = () => {
+    playing = !playing;
+    if (playing) { vb.play(); va.play(); } else { vb.pause(); va.pause(); va.currentTime = vb.currentTime; }
+    play.textContent = playing ? "Pause" : "Play";
+  };
+  const step = (d) => {
+    playing = false; play.textContent = "Play"; vb.pause(); va.pause();
+    const t = Math.max(0, Math.min(vb.duration - 1e-3, (frameOf(vb.currentTime) + d + 0.5) / clip.fps));
+    vb.currentTime = va.currentTime = t;
+  };
+  $("back").onclick = () => step(-1);
+  $("fwd").onclick = () => step(1);
+  document.querySelectorAll("[data-rate]").forEach((b) => b.onclick = () => {
+    document.querySelectorAll("[data-rate]").forEach(x => x.setAttribute("aria-pressed", x === b));
+    vb.playbackRate = va.playbackRate = Number(b.dataset.rate);
+  });
+
+  const n = () => clip.series.total_ms.length;
+  const frameOf = (t) => Math.min(n() - 1, Math.max(0, Math.floor(t * clip.fps + 1e-3)));
+
+  // ---- trace chart ----
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  function draw(fi) {
+    const dpr = window.devicePixelRatio || 1, W = chart.clientWidth, H = chart.clientHeight;
+    chart.width = W * dpr; chart.height = H * dpr;
+    const g = chart.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
+    const L = 34, R = 34, T = 8, B = 18, w = W - L - R, h = H - T - B;
+    const lat = clip.series.total_ms, haze = clip.series.haze, N = lat.length;
+    const yMax = Math.max(40, Math.ceil(Math.max(...lat) / 10) * 10);
+    const x = (i) => L + (N > 1 ? i / (N - 1) : 0) * w;
+    const yl = (v) => T + h - v / yMax * h;
+    const yh = (v) => T + h - v * h;
+    g.font = `11px ${css("--f-mono")}`; g.fillStyle = css("--muted"); g.strokeStyle = css("--line"); g.lineWidth = 1;
+    for (let v = 0; v <= yMax; v += 10) {
+      g.beginPath(); g.moveTo(L, yl(v) + .5); g.lineTo(L + w, yl(v) + .5); g.stroke();
+      g.textAlign = "right"; g.fillText(v, L - 6, yl(v) + 4);
+    }
+    g.textAlign = "left";
+    [0, 0.5, 1].forEach(v => g.fillText(Math.round(v * 100) + "%", L + w + 6, yh(v) + 4));
+    g.textAlign = "center"; g.fillText("frame", L + w / 2, H - 3);
+    // budget
+    g.setLineDash([5, 4]); g.strokeStyle = css("--budget"); g.beginPath(); g.moveTo(L, yl(30)); g.lineTo(L + w, yl(30)); g.stroke(); g.setLineDash([]);
+    // haze (area)
+    g.beginPath(); g.moveTo(x(0), yh(0)); haze.forEach((v, i) => g.lineTo(x(i), yh(v))); g.lineTo(x(N - 1), yh(0)); g.closePath();
+    g.globalAlpha = .16; g.fillStyle = css("--before"); g.fill(); g.globalAlpha = 1;
+    g.beginPath(); haze.forEach((v, i) => i ? g.lineTo(x(i), yh(v)) : g.moveTo(x(i), yh(v)));
+    g.strokeStyle = css("--before"); g.lineWidth = 1.5; g.stroke();
+    // latency
+    g.beginPath(); lat.forEach((v, i) => i ? g.lineTo(x(i), yl(v)) : g.moveTo(x(i), yl(v)));
+    g.strokeStyle = css("--accent"); g.lineWidth = 1.5; g.stroke();
+    // playhead
+    g.strokeStyle = css("--fg"); g.lineWidth = 1; g.beginPath(); g.moveTo(x(fi) + .5, T); g.lineTo(x(fi) + .5, T + h); g.stroke();
+    g.fillStyle = css("--accent"); g.beginPath(); g.arc(x(fi), yl(lat[fi]), 3.5, 0, Math.PI * 2); g.fill();
+    chart._geom = { L, w, N };
+  }
+  chart.addEventListener("click", (e) => {
+    const { L, w, N } = chart._geom || {}; if (!N) return;
+    const r = chart.getBoundingClientRect();
+    const i = Math.round(Math.min(1, Math.max(0, (e.clientX - r.left - L) / w)) * (N - 1));
+    vb.currentTime = va.currentTime = (i + 0.5) / clip.fps;
+  });
+
+  // ---- sync + readout loop ----
+  let last = -1;
+  function tick() {
+    if (playing && Math.abs(va.currentTime - vb.currentTime) > 1.5 / clip.fps) va.currentTime = vb.currentTime;
+    const fi = frameOf(vb.currentTime || 0);
+    if (fi !== last) {
+      last = fi;
+      $("rFrame").textContent = `${fi + 1} / ${n()}`;
+      $("rLat").innerHTML = `${clip.series.total_ms[fi].toFixed(1)}<small>ms</small>`;
+      $("rHaze").innerHTML = `${Math.round(clip.series.haze[fi] * 100)}<small>%</small>`;
+      $("rGlare").innerHTML = `${clip.series.glare[fi].toFixed(2)}<small>% FOV</small>`;
+      draw(fi);
+    }
+    requestAnimationFrame(tick);
+  }
+  window.addEventListener("resize", () => { last = -1; });
+  load(clip);
+  requestAnimationFrame(tick);
+})();
+</script>
